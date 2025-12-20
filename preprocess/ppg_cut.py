@@ -5,21 +5,23 @@ import numpy as np
 import pandas as pd
 from io import StringIO
 
-# ====== 参数 ======
+# ====== Parameters ======
 FS = 50
-ONE_MIN_SAMPLES = 60 * FS  # 3000
+ONE_MIN_SAMPLES = 60 * FS  # 3000 samples per minute
 
-INPUT_DIR = r"E:\大四上学习资料\对齐\ppg"
-OUT_EDA_DIR = r"E:\大四上学习资料\final\eda"
-OUT_PPG_DIR = r"E:\大四上学习资料\final\ppg"
-OUT_ACC_DIR = r"E:\大四上学习资料\final\acc"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 4个时间窗（单位：秒），取中心1分钟
+INPUT_DIR = os.path.join(BASE_DIR, "..", "data", "ppg")           # e.g., repo/data/ppg
+OUT_EDA_DIR = os.path.join(BASE_DIR, "..", "outputs", "eda")     # e.g., repo/outputs/eda
+OUT_PPG_DIR = os.path.join(BASE_DIR, "..", "outputs", "ppg")     # e.g., repo/outputs/ppg
+OUT_ACC_DIR = os.path.join(BASE_DIR, "..", "outputs", "acc")     # e.g., repo/outputs/acc
+
+# 4 time ranges (seconds). Extract the centered 1-minute window in each range.
 RANGES_SEC = [
-    (0*60 + 50, 4*60 + 20),   # 0:50 - 4:20
-    (5*60 + 10, 6*60 + 40),   # 5:10 - 6:40
-    (7*60 + 24, 9*60 + 24),   # 7:24 - 9:24
-    (9*60 + 40, 10*60 + 40),  # 9:40 - 10:40
+    (0 * 60 + 50, 4 * 60 + 20),    # 0:50 - 4:20
+    (5 * 60 + 10, 6 * 60 + 40),    # 5:10 - 6:40
+    (7 * 60 + 24, 9 * 60 + 24),    # 7:24 - 9:24
+    (9 * 60 + 40, 10 * 60 + 40),   # 9:40 - 10:40
 ]
 
 os.makedirs(OUT_EDA_DIR, exist_ok=True)
@@ -52,7 +54,7 @@ def extract_window_pad0_1d(x: np.ndarray, win_start_sec: float) -> np.ndarray:
     src0 = max(i0, 0)
     src1 = min(i1, n)
     if src1 <= src0:
-        print(f"[补0] 窗口完全越界：[{i0},{i1})，信号长度={n}，输出全0")
+        print(f"[Zero-pad] Window fully out of bounds: [{i0},{i1}), signal length={n}, output all zeros")
         return out
 
     dst0 = src0 - i0
@@ -60,12 +62,12 @@ def extract_window_pad0_1d(x: np.ndarray, win_start_sec: float) -> np.ndarray:
     out[dst0:dst1] = x[src0:src1]
 
     if i0 < 0 or i1 > n:
-        print(f"[补0] 窗口越界：[{i0},{i1})，信号长度={n}，已补零")
+        print(f"[Zero-pad] Window out of bounds: [{i0},{i1}), signal length={n}, padded with zeros")
 
     return out
 
 def extract_window_pad0_2d(X: np.ndarray, win_start_sec: float) -> np.ndarray:
-    """X shape: (N, C)，输出 (3000, C)，越界补0"""
+    """X shape: (N, C). Output: (3000, C). Out-of-bounds parts are padded with zeros."""
     i0 = sec_to_idx(win_start_sec)
     i1 = i0 + ONE_MIN_SAMPLES
 
@@ -75,7 +77,7 @@ def extract_window_pad0_2d(X: np.ndarray, win_start_sec: float) -> np.ndarray:
     src0 = max(i0, 0)
     src1 = min(i1, n)
     if src1 <= src0:
-        print(f"[补0] 窗口完全越界：[{i0},{i1})，信号长度={n}，输出全0(2D)")
+        print(f"[Zero-pad] Window fully out of bounds: [{i0},{i1}), signal length={n}, output all zeros (2D)")
         return out
 
     dst0 = src0 - i0
@@ -83,68 +85,69 @@ def extract_window_pad0_2d(X: np.ndarray, win_start_sec: float) -> np.ndarray:
     out[dst0:dst1, :] = X[src0:src1, :]
 
     if i0 < 0 or i1 > n:
-        print(f"[补0] 窗口越界：[{i0},{i1})，信号长度={n}，已补零(2D)")
+        print(f"[Zero-pad] Window out of bounds: [{i0},{i1}), signal length={n}, padded with zeros (2D)")
 
     return out
 
 def read_onecol_comma_xlsx(xlsx_path: str) -> pd.DataFrame:
     """
-    兼容读取：
-    1) 正常xlsx
-    2) 伪xlsx（实际是文本/CSV但后缀是xlsx）
-    3) xlsx里只有一列，每行是逗号分隔字符串
+    Compatible reading for:
+    1) Normal .xlsx files
+    2) Fake .xlsx (actually text/CSV but named .xlsx)
+    3) .xlsx with only one column, where each row is a comma-separated string
     """
-    # 先尝试按Excel读取
+    # First try reading as Excel
     try:
         raw = pd.read_excel(xlsx_path, header=None, engine=None)
-        # 如果只有一列，且每行像 "timestamp,skin,ax..." 这种逗号分隔文本
+        # If there's only one column and each row looks like "timestamp,skin,ax..." (comma-separated text)
         if raw.shape[1] == 1:
             lines = raw.iloc[:, 0].dropna().astype(str).tolist()
             text = "\n".join(lines)
             return pd.read_csv(StringIO(text), sep=",")
         else:
-            # 已经是多列结构，尝试用第一行当表头再读一次更合理
+            # Already multi-column; reading again with the first row as header is usually more reasonable
             return pd.read_excel(xlsx_path)
     except Exception:
-        # 按纯文本读取（常见：文件根本不是excel）
-        # 重要：用二进制读，再尝试utf-8/gbk解码，避免编码问题
+        # Fall back to plain-text reading (common: file is not an actual Excel file)
+        # Important: read as bytes first, then try utf-8/gbk decoding to avoid encoding issues
         with open(xlsx_path, "rb") as f:
             b = f.read()
 
         for enc in ("utf-8-sig", "utf-8", "gbk"):
             try:
                 s = b.decode(enc)
-                # 直接按CSV解析
+                # Parse directly as CSV
                 return pd.read_csv(StringIO(s), sep=",")
             except Exception:
                 pass
 
-        # 都失败就抛出明确错误
-        raise ValueError("文件既无法按Excel读取，也无法按文本CSV解析。可能文件损坏或不是逗号分隔格式。")
+        # If all attempts fail, raise a clear error
+        raise ValueError("Cannot read as Excel or parse as CSV text. The file may be corrupted or not comma-separated.")
 
 def to_numeric_series_keep_len(df: pd.DataFrame, col: str) -> np.ndarray:
     if col not in df.columns:
-        raise KeyError(f"列不存在：{col}，实际列为：{list(df.columns)}")
+        raise KeyError(f"Column not found: {col}. Existing columns: {list(df.columns)}")
     return pd.to_numeric(df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
 
 def to_numeric_matrix_keep_len(df: pd.DataFrame, cols) -> np.ndarray:
     for c in cols:
         if c not in df.columns:
-            raise KeyError(f"列不存在：{c}，实际列为：{list(df.columns)}")
+            raise KeyError(f"Column not found: {c}. Existing columns: {list(df.columns)}")
     mat = df[cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(dtype=float)
     return mat
 
 def main():
-    files = glob.glob(os.path.join(INPUT_DIR, "*_ppg_after.xlsx"))
+    pattern = os.path.join(INPUT_DIR, "*_ppg_after.xlsx")
+    files = glob.glob(pattern)
     files = sorted(files, key=numeric_prefix_ppg)
 
     if not files:
-        print("未找到输入文件：", os.path.join(INPUT_DIR, "*_ppg_after.xlsx"))
+        print("No input files found:", pattern)
         return
 
     windows = [center_one_minute(a, b) for (a, b) in RANGES_SEC]
 
-    print("将提取的4个中心一分钟窗口(秒)：")
+    print("The 4 centered 1-minute windows to extract (seconds):")
     for k, (ws, we) in enumerate(windows, 1):
         print(f"  window{k}: {ws:.3f}s -> {we:.3f}s (60s, {ONE_MIN_SAMPLES} samples)")
 
@@ -152,28 +155,28 @@ def main():
         base = os.path.basename(path)
         m = re.match(r"(\d+)_ppg_after\.xlsx$", base, flags=re.IGNORECASE)
         if not m:
-            print(f"[跳过] 文件名不符合 *_ppg_after.xlsx：{base}")
+            print(f"[Skip] Filename does not match *_ppg_after.xlsx: {base}")
             continue
         idx = m.group(1)
 
         try:
             df = read_onecol_comma_xlsx(path)
         except Exception as e:
-            print(f"[失败] 读取/解析 {base}：{e}")
+            print(f"[Failed] Read/parse {base}: {e}")
             continue
 
         try:
             eda = to_numeric_series_keep_len(df, "skin")
-            ppg = to_numeric_series_keep_len(df, "spo2")   # 用血氧代替ppg原始波形
-            acc6 = to_numeric_matrix_keep_len(df, ACC_COLS)  # (N,6)
+            ppg = to_numeric_series_keep_len(df, "spo2")      # Use SpO2 as a proxy for the PPG raw waveform
+            acc6 = to_numeric_matrix_keep_len(df, ACC_COLS)   # (N, 6)
         except Exception as e:
-            print(f"[失败] {base} 取列失败：{e}")
+            print(f"[Failed] Column extraction failed for {base}: {e}")
             continue
 
         for k, (ws, we) in enumerate(windows, 1):
             eda_seg = extract_window_pad0_1d(eda, ws)          # (3000,)
             ppg_seg = extract_window_pad0_1d(ppg, ws)          # (3000,)
-            acc_seg = extract_window_pad0_2d(acc6, ws)         # (3000,6)
+            acc_seg = extract_window_pad0_2d(acc6, ws)         # (3000, 6)
 
             out_eda = os.path.join(OUT_EDA_DIR, f"{idx}_eda_final_{k}.csv")
             out_ppg = os.path.join(OUT_PPG_DIR, f"{idx}_ppg_final_{k}.csv")
@@ -183,7 +186,7 @@ def main():
             pd.DataFrame(ppg_seg).to_csv(out_ppg, index=False, header=False)
             pd.DataFrame(acc_seg).to_csv(out_acc, index=False, header=False)
 
-        print(f"[完成] {base} -> eda/ppg/acc 各输出 4 个窗口")
+        print(f"[Done] {base} -> exported 4 windows each for eda/ppg/acc")
 
 if __name__ == "__main__":
     main()
