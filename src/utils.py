@@ -1,13 +1,18 @@
 # src/utils.py
-import os, re, random
+import os
+import re
+import random
 import numpy as np
 import torch
 
-# 你定义：1=悲伤，2=平静，3=开心，4=愤怒
+# Label mapping you defined:
+# 1 = sad, 2 = calm, 3 = happy, 4 = angry
 DIGIT2CLASS = {1: 0, 2: 1, 3: 2, 4: 3}
 ID2LABEL = {0: "sad", 1: "calm", 2: "happy", 3: "angry"}
 
+
 def seed_everything(seed: int = 42):
+    """Seed Python / NumPy / PyTorch for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -15,36 +20,44 @@ def seed_everything(seed: int = 42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
 def parse_from_filename(path: str):
     """
-    解析:
+    Parse filename pattern:
       1_ecg_final_1.csv  -> sid=1, modality=ecg, label_digit=1
     """
     fn = os.path.basename(path)
     m = re.match(r"(\d+)_([a-zA-Z]+)_final_(\d+)\.csv$", fn)
     if m is None:
         raise ValueError(f"Bad filename format: {fn}")
+
     sid = int(m.group(1))
     modality = m.group(2).lower()
     label_digit = int(m.group(3))
+
     if label_digit not in DIGIT2CLASS:
         raise ValueError(f"Label digit must be 1~4, got {label_digit} in {fn}")
+
     return sid, modality, label_digit
 
+
 def make_sample_key(sid: int, label_digit: int) -> str:
-    # 每个人每个情绪是一条样本
+    """Each subject and each emotion corresponds to one sample."""
     return f"{sid}_L{label_digit}"
 
+
 def zscore(x: np.ndarray, eps: float = 1e-6):
+    """Z-score normalization."""
     mu = float(x.mean())
     sd = float(x.std())
     return (x - mu) / (sd + eps)
 
+
 def pick_signal_column(df):
     """
-    从csv中挑信号列：
-    - 排除 timestamp/time/ts
-    - 优先选第一个剩余列
+    Pick the signal column from a CSV:
+      - exclude timestamp/time/ts columns
+      - prefer the first remaining column
     """
     cols = list(df.columns)
     drop = {"timestamp", "time", "ts"}
