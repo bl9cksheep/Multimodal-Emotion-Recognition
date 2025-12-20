@@ -1,43 +1,50 @@
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
 
-# === 1. 读取数据 ===
-df = pd.read_csv(r"E:\大四上学习资料\mmj_ecg.csv")
-ecg = df.iloc[:, 1].values     # ECG（第二列）
-#ecg = ecg[:250*20]             # 取前 20 秒（5000 点）
+# ====== Paths (project-relative, safe for GitHub) ======
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# === 2. 平滑 ECG ===
+# Input / output paths (adjust to your repo layout if needed)
+INPUT_CSV = os.path.join(BASE_DIR, "..", "data", "mmj_ecg.csv")         # e.g., repo/data/mmj_ecg.csv
+OUTPUT_CSV = os.path.join(BASE_DIR, "..", "outputs", "ecg_after_impact.csv")  # e.g., repo/outputs/ecg_after_impact.csv
+os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
+
+# ====== 1. Read data ======
+df = pd.read_csv(INPUT_CSV)
+ecg = df.iloc[:, 1].values  # ECG (2nd column)
+# ecg = ecg[:250 * 20]       # Keep first 20 seconds (5000 samples at 250 Hz), optional
+
+# ====== 2. Smooth ECG ======
 ecg_smooth = savgol_filter(ecg, window_length=31, polyorder=3)
 
-# === 3. 一阶差分增强突变 ===
+# ====== 3. First-order difference to emphasize abrupt changes ======
 diff = np.abs(np.diff(ecg_smooth))
 
-# === 4. 自适应阈值检测跳变点 ===
+# ====== 4. Adaptive thresholding to detect the impact point ======
 k = 6
 threshold = np.mean(diff) + k * np.std(diff)
 candidate_indices = np.where(diff > threshold)[0]
 
 if len(candidate_indices) > 0:
-    impact_point = candidate_indices[0]
-    print("突变点位置:", impact_point)
+    impact_point = int(candidate_indices[0])
+    print("Detected impact point index:", impact_point)
 else:
-    raise ValueError("未检测到突变，请尝试调整 k 值")
+    raise ValueError("No impact point detected. Try adjusting k.")
 
-# === 5. 截取突变点之后的数据 ===
+# ====== 5. Crop ECG after the impact point ======
 ecg_after = ecg[impact_point:]
 
-# === 6. 保存为 CSV（只保存 ECG）===
-output_path = r"E:\大四上学习资料\ecg_after_impact.csv"
-pd.DataFrame(ecg_after, columns=["ECG"]).to_csv(output_path, index=False)
+# ====== 6. Save to CSV (ECG only) ======
+pd.DataFrame(ecg_after, columns=["ECG"]).to_csv(OUTPUT_CSV, index=False)
+print("Saved ECG after impact to:", OUTPUT_CSV)
 
-print("已保存突变后的 ECG 到：", output_path)
-
-# === 7. 画图验证 ===
-plt.figure(figsize=(12,4))
+# ====== 7. Plot for verification ======
+plt.figure(figsize=(12, 4))
 plt.plot(ecg, label="ECG")
-plt.axvline(impact_point, color='r', linestyle='--', label="Detected Impact")
+plt.axvline(impact_point, color="r", linestyle="--", label="Detected Impact")
 plt.legend()
 plt.title("Detected Impact Point")
 plt.xlabel("Sample Index")
