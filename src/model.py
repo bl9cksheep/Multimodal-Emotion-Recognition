@@ -7,28 +7,39 @@ from transformers import PatchTSTModel
 
 
 def freeze_module(m: nn.Module):
+    """Freeze all parameters in a module (no gradient updates)."""
     for p in m.parameters():
         p.requires_grad = False
 
 
 def info_nce(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.1) -> torch.Tensor:
     """
-    z1,z2: (B,D)，正样本是同index配对，负样本是batch内其他样本
+    InfoNCE loss within a batch.
+
+    Args:
+        z1, z2: shape (B, D). Positive pairs are matched by the same index.
+               Negatives are other samples within the batch.
+        temperature: softmax temperature.
+
+    Returns:
+        Scalar contrastive loss.
     """
     z1 = F.normalize(z1, dim=-1)
     z2 = F.normalize(z2, dim=-1)
-    logits = (z1 @ z2.t()) / temperature  # (B,B)
+    logits = (z1 @ z2.t()) / temperature  # (B, B)
     labels = torch.arange(z1.size(0), device=z1.device)
     return F.cross_entropy(logits, labels)
 
 
 class PatchTSTFrozenEncoder(nn.Module):
     """
-    用 HF PatchTSTModel 作为 frozen encoder：
-    - 输入: (B, L) 单通道原始波形
-    - 内部: resample 到 context_length（默认取 config.context_length，否则 fallback=512）
-            并复制到 num_input_channels（默认取 config.num_input_channels，否则 fallback=7）
-    - 输出: (B, D) embedding（mean pooling last_hidden_state）
+    Use Hugging Face PatchTSTModel as a frozen encoder.
+
+    - Input: (B, L), single-channel raw waveform
+    - Internals:
+        1) Resample to context_length (defaults to config.context_length, fallback=512)
+        2) Repeat channels to num_input_channels (defaults to config.num_input_channels, fallback=7)
+    - Output: (B, D) embedding (mean pooling over last_hidden_state)
     """
     def __init__(
         self,
@@ -37,6 +48,13 @@ class PatchTSTFrozenEncoder(nn.Module):
         target_len: int | None = None,
         target_channels: int | None = None,
     ):
+        """
+        Args:
+            model_name: HF model name or local path.
+            cache_dir: Optional HF cache directory (leave None for default; avoid hard-coded absolute paths in GitHub).
+            target_len: Optional override for context length.
+            target_channels: Optional override for number of input channels.
+        """
         super().__init__()
         self.model = PatchTSTModel.from_pretrained(model_name, cache_dir=cache_dir)
         self.model.eval()
@@ -44,41 +62,48 @@ class PatchTSTFrozenEncoder(nn.Module):
 
         cfg = self.model.config
 
-        # PatchTST 常见字段：num_input_channels / context_length
-        self.num_input_channels = int(getattr(cfg, "num_input_channels", 7) if target_channels is None else target_channels)
-        self.context_length = int(getattr(cfg, "context_length", 512) if target_len is None else target_len)
+        # Common PatchTST config fields: num_input_channels / context_length
+        self.num_input_channels = int(
+            getattr(cfg, "num_input_channels", 7) if target_channels is None else target_channels
+        )
+        self.context_length = int(
+            getattr(cfg, "context_length", 512) if target_len is None else target_len
+        )
 
-        # hidden size
+        # Hidden size (different configs may use different attribute names)
         self.hidden_size = int(getattr(cfg, "hidden_size", getattr(cfg, "d_model", 768)))
 
     @torch.no_grad()
     def forward(self, x_1d: torch.Tensor) -> torch.Tensor:
         """
-        x_1d: (B, L)
-        return: (B, D)
+        Args:
+            x_1d: (B, L)
+
+        Returns:
+            emb: (B, D)
         """
-        # 1) resample 到 context_length（不滑窗，整段压缩）
-        # (B,L) -> (B,1,L) -> (B,1,T)
+        # 1) Resample to context_length (compress the whole sequence, no sliding window)
+        # (B, L) -> (B, 1, L) -> (B, 1, T)
         x = x_1d.unsqueeze(1)
         x = F.interpolate(x, size=self.context_length, mode="linear", align_corners=False)
 
-        # 2) 复制通道到 num_input_channels
-        # (B,1,T) -> (B,C,T) -> (B,T,C)
+        # 2) Repeat channels to num_input_channels
+        # (B, 1, T) -> (B, C, T) -> (B, T, C)
         x = x.repeat(1, self.num_input_channels, 1).transpose(1, 2).contiguous()
 
         out = self.model(past_values=x, return_dict=True)
-        h = out.last_hidden_state               # (B, n_patches, hidden)
-        # 统一把除了 batch 和 hidden 以外的维度都平均掉
-        # 目标：emb -> (B, H)
+        h = out.last_hidden_state  # typically (B, n_patches, hidden) but can vary by model/config
+
+        # Pool across all non-batch, non-hidden dimensions to obtain (B, H)
         if h.dim() == 2:
             emb = h
         elif h.dim() == 3:
             # (B, T, H)
             emb = h.mean(dim=1)
         elif h.dim() == 4:
-            # 常见情况： (B, C, T, H) 或 (B, T, C, H)
-            # 我们把除 B 和最后一维 H 之外的维度全部 mean
-            emb = h.mean(dim=tuple(range(1, h.dim()-1)))
+            # Common cases: (B, C, T, H) or (B, T, C, H)
+            # Mean over all dims except batch and the last hidden dim
+            emb = h.mean(dim=tuple(range(1, h.dim() - 1)))
         else:
             raise RuntimeError(f"Unexpected last_hidden_state dim={h.dim()}, shape={tuple(h.shape)}")
 
@@ -86,7 +111,15 @@ class PatchTSTFrozenEncoder(nn.Module):
 
 
 class FusionTransformer(nn.Module):
-    def __init__(self, emb_dim=256, n_layers=1, n_heads=4, ff_dim=512, dropout=0.1, n_classes=4):
+    def __init__(
+        self,
+        emb_dim: int = 256,
+        n_layers: int = 1,
+        n_heads: int = 4,
+        ff_dim: int = 512,
+        dropout: float = 0.1,
+        n_classes: int = 4,
+    ):
         super().__init__()
         self.cls = nn.Parameter(torch.zeros(1, 1, emb_dim))
         layer = nn.TransformerEncoderLayer(
@@ -102,20 +135,27 @@ class FusionTransformer(nn.Module):
         self.head = nn.Sequential(nn.LayerNorm(emb_dim), nn.Linear(emb_dim, n_classes))
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        # tokens: (B,3,D)
+        """
+        Args:
+            tokens: (B, 3, D) modality tokens
+
+        Returns:
+            logits: (B, n_classes)
+        """
         B = tokens.size(0)
         cls = self.cls.expand(B, -1, -1)
-        x = torch.cat([cls, tokens], dim=1)    # (B,4,D)
+        x = torch.cat([cls, tokens], dim=1)  # (B, 4, D)
         x = self.tr(x)
-        return self.head(x[:, 0])             # (B,4)
+        return self.head(x[:, 0])  # (B, n_classes)
 
 
 class MultiModalEmotionModel(nn.Module):
     """
-    三模态都用同一个 PatchTSTFrozenEncoder（共享权重，节省显存&保证同空间）。
-    encoder frozen，只训练：
-    - proj（对比学习）
-    - fuser（transformer融合）
+    Use a single shared PatchTSTFrozenEncoder for all three modalities (shared weights).
+    The encoder is frozen. We only train:
+      - to_emb (projection from encoder hidden size to emb_dim)
+      - proj (contrastive projection head)
+      - fuser (transformer fusion + classifier)
     """
     def __init__(
         self,
@@ -129,33 +169,50 @@ class MultiModalEmotionModel(nn.Module):
         self.encoder = PatchTSTFrozenEncoder(model_name=patchtst_name, cache_dir=cache_dir)
         enc_dim = self.encoder.hidden_size
 
-        # 把 PatchTST 的 hidden 映射到你想要的 embedding 维度（可训练）
+        # Map PatchTST hidden size to the desired embedding dimension (trainable)
         self.to_emb = nn.Linear(enc_dim, emb_dim)
 
-        # 对比学习投影头（可训练）
+        # Contrastive projection head (trainable)
         self.proj = nn.Sequential(
             nn.Linear(emb_dim, emb_dim),
             nn.ReLU(inplace=True),
             nn.Linear(emb_dim, emb_dim),
         )
 
-        self.fuser = FusionTransformer(emb_dim=emb_dim, n_layers=1, n_heads=4, ff_dim=512, dropout=0.1, n_classes=n_classes)
+        self.fuser = FusionTransformer(
+            emb_dim=emb_dim,
+            n_layers=1,
+            n_heads=4,
+            ff_dim=512,
+            dropout=0.1,
+            n_classes=n_classes,
+        )
 
     def forward(self, batch: Dict[str, torch.Tensor], temperature: float = 0.1) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            batch: dict with keys {"ecg","eda","ppg"} and tensors shaped (B, L)
+            temperature: InfoNCE temperature
+
+        Returns:
+            dict with:
+              - logits: (B, n_classes)
+              - lc: scalar contrastive loss
+        """
         ecg, eda, ppg = batch["ecg"], batch["eda"], batch["ppg"]
 
-        # frozen PatchTST encoder
+        # Frozen PatchTST encoder
         with torch.no_grad():
             z_ecg = self.encoder(ecg)  # (B, enc_dim)
             z_eda = self.encoder(eda)
             z_ppg = self.encoder(ppg)
 
-        # 映射到统一 emb_dim（可训练）
+        # Trainable mapping to a unified emb_dim
         z_ecg = self.to_emb(z_ecg)
         z_eda = self.to_emb(z_eda)
         z_ppg = self.to_emb(z_ppg)
 
-        # contrastive on projected embeddings
+        # Contrastive learning on projected embeddings
         p_ecg = self.proj(z_ecg)
         p_eda = self.proj(z_eda)
         p_ppg = self.proj(z_ppg)
@@ -166,7 +223,7 @@ class MultiModalEmotionModel(nn.Module):
             + info_nce(p_eda, p_ppg, temperature)
         ) / 3.0
 
-        tokens = torch.stack([z_ecg, z_eda, z_ppg], dim=1)  # (B,3,emb_dim)
+        tokens = torch.stack([z_ecg, z_eda, z_ppg], dim=1)  # (B, 3, emb_dim)
         logits = self.fuser(tokens)
 
         return {"logits": logits, "lc": lc}
