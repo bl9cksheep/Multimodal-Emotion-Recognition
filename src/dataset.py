@@ -14,8 +14,9 @@ from .utils import (
 
 def build_index(data_root: str) -> Dict[str, Dict]:
     """
-    扫描 data_root/{ecg,eda,ppg} 下的csv，按 (sid,label_digit) 对齐三模态。
-    返回:
+    Scan CSV files under data_root/{ecg,eda,ppg} and align three modalities by (sid, label_digit).
+
+    Returns:
       index[sample_key] = {
         "sid": sid,
         "label_digit": label_digit,
@@ -23,6 +24,9 @@ def build_index(data_root: str) -> Dict[str, Dict]:
         "ecg": path, "eda": path, "ppg": path
       }
     """
+    # Normalize path for cross-platform usage (safe for GitHub)
+    data_root = os.path.abspath(os.path.expanduser(data_root))
+
     temp: Dict[str, Dict] = {}
 
     for modality in ["ecg", "eda", "ppg"]:
@@ -38,7 +42,7 @@ def build_index(data_root: str) -> Dict[str, Dict]:
             temp[key]["label"] = cls
             temp[key][modality] = p
 
-    # 只保留三模态齐全
+    # Keep only samples that have all three modalities
     index = {
         k: v for k, v in temp.items()
         if all(mm in v for mm in ["ecg", "eda", "ppg"]) and "label" in v
@@ -52,9 +56,9 @@ class MultiModalEmotionDataset(Dataset):
         index: Dict[str, Dict],
         sample_keys: List[str],
         normalize: bool = True,
-        ecg_len: int = 15000,   # 250Hz * 60s
-        other_len: int = 3000,  # 50Hz * 60s
-        preload: bool = True,   # ✅ 新增：是否预加载到内存
+        ecg_len: int = 15000,   # 250 Hz * 60 s
+        other_len: int = 3000,  # 50 Hz * 60 s
+        preload: bool = True,   # NEW: whether to preload all data into memory
     ):
         self.index = index
         self.sample_keys = sample_keys
@@ -63,7 +67,7 @@ class MultiModalEmotionDataset(Dataset):
         self.other_len = other_len
         self.preload = preload
 
-        # cache: key -> dict(tensors)
+        # Cache: key -> dict(tensors)
         self.cache: Dict[str, Dict[str, torch.Tensor]] = {}
 
         if self.preload:
@@ -84,14 +88,18 @@ class MultiModalEmotionDataset(Dataset):
 
     def _read_1d_signal(self, path: str, target_len: int) -> np.ndarray:
         """
-        读取一个csv中的单通道信号列，并做长度对齐 + 可选zscore。
-        返回 numpy float32: shape (target_len,)
+        Read a single-channel signal from a CSV, then:
+          - align length by cropping / zero-padding
+          - optionally apply z-score normalization
+
+        Returns:
+          numpy float32 array with shape (target_len,)
         """
         df = pd.read_csv(path)
         col = pick_signal_column(df)
         x = df[col].to_numpy(dtype=np.float32)
 
-        # 固定长度：裁剪/补零
+        # Fixed length: crop or pad with zeros
         if len(x) >= target_len:
             x = x[:target_len]
         else:
@@ -108,11 +116,11 @@ class MultiModalEmotionDataset(Dataset):
     def __getitem__(self, i: int):
         k = self.sample_keys[i]
 
-        # ✅ 预加载：直接从内存返回
+        # Preloaded: return directly from memory
         if self.preload:
             return self.cache[k]
 
-        # 否则：按需读盘（慢，不推荐）
+        # Otherwise: load on demand from disk (slower)
         rec = self.index[k]
         ecg = self._read_1d_signal(rec["ecg"], self.ecg_len)
         eda = self._read_1d_signal(rec["eda"], self.other_len)
