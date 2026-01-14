@@ -34,7 +34,6 @@ Hugging Face PatchTST reference:
 
 ## Demo
 
-We plan to provide an end to end demo that covers data processing and emotion recognition inference.
+An end-to-end demo of this project has been completed and is provided in **video form**, showcasing the full workflow from data loading / preprocessing to multimodal emotion recognition inference and visualization.
 
-Coming soon.
-
+- **Demo video**: `assets/demo.mp4`  <!-- TODO: replace with your actual path or link -->
